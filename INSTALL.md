@@ -7,7 +7,7 @@ Bu rehber, **Antalya Kargo Optimizasyonu Projesi**'nin yerel bilgisayarınızda 
 Öncelikle Git deposunu yerel diskinize indirin ve proje klasörüne girin:
 
 ```bash
-git clone [https://github.com/hustle342/Antalya-Kargo-Uygulamasi.git](https://github.com/hustle342/Antalya-Kargo-Uygulamasi.git)
+git clone https://github.com/hustle342/Antalya-Kargo-Uygulamasi.git
 cd Antalya-Kargo-Uygulamasi
 
 
