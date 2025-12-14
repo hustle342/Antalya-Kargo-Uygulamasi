@@ -1,0 +1,11 @@
+# KRİTİK GİZLİLİK EKLEMELERİ (STREAMLIT/API/NGROK)
+.streamlit/secrets.toml
+ngrok
+ngrok-stable-linux-amd64.zip
+
+# Python ve Ortam Dışlamaları
+venv/
+env/
+__pycache__/
+*.pyc
+.ipynb_checkpoints
