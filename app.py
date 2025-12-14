@@ -1,0 +1,342 @@
+# -*- coding: utf-8 -*-
+"""
+Yapay Zeka Destekli Antalya Kargo Dağıtım Optimizasyonu Projesi
+Karınca Kolonisi Algoritması (ACO) ile Gezgin Satıcı Problemi (TSP) Çözümü.
+
+Not: Bu dosya, Jupyter/Colab ortamında çalıştırılan kabuk komutlarından temizlenmiştir.
+"""
+
+import numpy as np
+import random
+import googlemaps
+import pandas as pd
+import folium
+import streamlit as st
+import plotly.express as px
+from streamlit_folium import folium_static
+from datetime import datetime
+ 
+# ====================================================================
+# A. VERİ YAPISI VE SABİTLER (Antalya/Muratpaşa 21 Nokta)
+# ====================================================================
+ 
+# Başlangıç noktası Kargo Merkezi dahil 21 durak.
+NOKTA_KOORDINATLARI = {
+     "Kargo Merkezi (0)": (36.862423, 30.730075),
+     "Carrefoursa (1)": (36.864163, 30.729206),
+     "Mcdonald's (2)": (36.862628, 30.729913),
+     "Nejat Balık (3)": (36.861220, 30.728667),
+     "Moon Lara (4)": (36.859961, 30.731056),
+     "Göz Balık Lara (5)": (36.858038, 30.734946),
+     "Seda Yerli (6)": (36.865133, 30.733993),
+     "Fahreneit Coffee (7)": (36.865768, 30.733036),
+     "Nallıbahçe (8)": (36.870950, 30.738125),
+     "Çorbacı Şemsi (9)": (36.864815, 30.741842),
+     "Tahtakale Şirinyalı (10)": (36.862563, 30.743249),
+     "Laura AVM (11)": (36.858174, 30.746641),
+     "Punto Emlak (12)": (36.863311, 30.737444),
+     "Samet Sağlam Kuaför (13)": (36.860230, 30.735989),
+     "7 Köfte (14)": (36.859184, 30.736851),
+     "Sarı Demlik (15)": (36.858136, 30.739758),
+     "DHL (16)": (36.858269, 30.742237),
+     "Leticia (17)": (36.857887, 30.744275),
+     "Loft 1502 (18)": (36.857174, 30.744532),
+     "La Maja (19)": (36.857831, 30.745047),
+     "MM Migros (20)": (36.858102, 30.746131)
+}
+ 
+nokta_isimleri = list(NOKTA_KOORDINATLARI.keys())
+koordinatlar = list(NOKTA_KOORDINATLARI.values())
+durak_sayisi = len(nokta_isimleri)
+ 
+# ====================================================================
+# B. GOOGLE MAPS API İLE MESAFA MATRİSİ
+# ====================================================================
+ 
+# API İstemcisi başlatma ve güvenlik kontrolü
+gmaps_istemcisi = None
+API_ANAHTARI = None
+ 
+try:
+     # 1. API Anahtarını güvenli dosyadan okur
+     API_ANAHTARI = st.secrets["google_maps"]["api_key"]
+ 
+     # 2. İstemciyi başlatırken okunan değişkeni kullanır
+     gmaps_istemcisi = googlemaps.Client(key=API_ANAHTARI)
+ 
+except KeyError:
+     st.error("HATA: API Anahtarı bulunamadı. Lütfen `.streamlit/secrets.toml` dosyanızı kontrol edin.")
+except Exception:
+     st.error("API İstemcisi başlatılamadı.")
+ 
+ 
+@st.cache_data(show_spinner="Gerçek Yol Mesafeleri Hesaplanıyor...")
+def gercek_mesafe_matrisi_olustur(koordinat_listesi):
+     """
+     Verilen koordinatlar arasındaki gerçek sürüş mesafelerini (KM) hesaplar ve matris döndürür.
+     """
+     if gmaps_istemcisi is None:
+         # Hata varsa çok büyük değer matrisi döndür
+         return np.zeros((durak_sayisi, durak_sayisi)) + 999999.0
+ 
+     N = len(koordinat_listesi)
+     mesafe_matrisi = np.zeros((N, N))
+     now = datetime.now()
+ 
+     origins_destinations = [f"{lat},{lng}" for lat, lng in koordinat_listesi]
+ 
+     for i in range(N):
+         for j in range(N):
+             if i == j:
+                 continue
+ 
+             origin = origins_destinations[i]
+             destination = origins_destinations[j]
+ 
+             try:
+                 sonuc = gmaps_istemcisi.distance_matrix(
+                     origins=[origin],
+                     destinations=[destination],
+                     mode="driving",
+                     departure_time=now
+                 )
+ 
+                 element = sonuc['rows'][0]['elements'][0]
+ 
+                 if element['status'] == 'OK':
+                     mesafe_km = element['distance']['value'] / 1000.0
+                     mesafe_matrisi[i, j] = mesafe_km
+                 else:
+                     mesafe_matrisi[i, j] = 999999.0
+ 
+             except Exception:
+                 mesafe_matrisi[i, j] = 999999.0
+ 
+     return mesafe_matrisi
+ 
+# ====================================================================
+# C. KARINCA KOLONİSİ ALGORİTMASI (ACO) SINIFI - NAN/INF HATASI DÜZELTİLDİ
+# ====================================================================
+ 
+class KarincaKolonisiOptimizasyonu:
+     def __init__(self, mesafeler, karinca_sayisi, iterasyon_sayisi, alfa, beta, buharlasma_orani):
+          self.mesafeler = mesafeler
+          self.durak_sayisi = len(mesafeler)
+          self.karinca_sayisi = karinca_sayisi
+          self.iterasyon_sayisi = iterasyon_sayisi
+          self.alfa = alfa
+          self.beta = beta
+          self.buharlasma_orani = buharlasma_orani
+ 
+          # Heuristik Bilgi (Görünürlük): 1 / Mesafe
+          self.gorunurluk = 1.0 / (mesafeler + np.identity(self.durak_sayisi) * 1e-6)
+ 
+          # Feromon matrisi başlangıç değeri
+          self.feromon = np.ones((self.durak_sayisi, self.durak_sayisi)) / self.durak_sayisi
+ 
+          self.en_iyi_rota = None
+          self.en_kisa_mesafe = np.inf
+          self.mesafe_gecmisi = []
+ 
+     def _toplam_mesafe_hesapla(self, rota):
+          """Bir rotanın toplam mesafesini hesaplar (turu tamamlar)."""
+          mesafe = 0
+          for i in range(len(rota)):
+               baslangic_durak = rota[i]
+               bitis_durak = rota[(i + 1) % self.durak_sayisi]
+               mesafe += self.mesafeler[baslangic_durak, bitis_durak]
+          return mesafe
+ 
+     def _sonraki_duragi_sec(self, mevcut_durak, ziyaret_edilenler):
+          """Karınca için bir sonraki durak seçimini olasılıksal yapar."""
+ 
+          ziyaret_edilmeyenler_indeks = [durak for durak in range(self.durak_sayisi) if durak not in ziyaret_edilenler]
+ 
+          if not ziyaret_edilmeyenler_indeks:
+               return None
+ 
+          feromon_degerleri = self.feromon[mevcut_durak, ziyaret_edilmeyenler_indeks]
+          gorunurluk_degerleri = self.gorunurluk[mevcut_durak, ziyaret_edilmeyenler_indeks]
+ 
+          # KRİTİK DÜZELTME: NaN ve Sonsuz (Inf) değerleri temizle
+          gorunurluk_degerleri[np.isinf(gorunurluk_degerleri)] = 0.0
+          feromon_degerleri[np.isnan(feromon_degerleri)] = 0.0
+ 
+          pay = (feromon_degerleri ** self.alfa) * (gorunurluk_degerleri ** self.beta)
+          payda = np.sum(pay)
+ 
+          if payda == 0 or np.any(np.isnan(pay)):
+               # Tüm yollar tıkalıysa rastgele seçim yap.
+               olasiliklar = np.ones(len(ziyaret_edilmeyenler_indeks)) / len(ziyaret_edilmeyenler_indeks)
+          else:
+               olasiliklar = pay / payda
+ 
+          # KRİTİK KONTROL: Kayan nokta hatası için olasılıkları normalleştir.
+          if not np.isclose(np.sum(olasiliklar), 1.0):
+               olasiliklar /= np.sum(olasiliklar)
+ 
+ 
+          # Olasılığa göre bir sonraki durak seçimi
+          secilen_indeks = np.random.choice(
+               len(ziyaret_edilmeyenler_indeks),
+               p=olasiliklar
+          )
+          sonraki_durak = ziyaret_edilmeyenler_indeks[secilen_indeks]
+ 
+          return sonraki_durak
+ 
+     def _rota_olustur(self, baslangic_durak):
+          """Bir karıncanın tam rotasını oluşturur."""
+          rota = [baslangic_durak]
+          ziyaret_edilenler = {baslangic_durak}
+ 
+          for _ in range(self.durak_sayisi - 1):
+               mevcut_durak = rota[-1]
+               sonraki_durak = self._sonraki_duragi_sec(mevcut_durak, ziyaret_edilenler)
+ 
+               if sonraki_durak is None: break
+ 
+               rota.append(sonraki_durak)
+               ziyaret_edilenler.add(sonraki_durak)
+ 
+          return rota
+ 
+     def _feromon_guncelle(self, rotalar, rota_mesafeleri):
+          """Buharlaşma ve yeni birikim ile feromon matrisini günceller."""
+ 
+          # 1. Buharlaşma
+          self.feromon *= (1.0 - self.buharlasma_orani)
+ 
+          # 2. Yeni feromon birikimi
+          for rota, mesafe in zip(rotalar, rota_mesafeleri):
+               if mesafe <= 0 or mesafe >= 999999.0: continue
+ 
+               # Feromon miktarı: 1 / Mesafe
+               feromon_birikimi = 1.0 / mesafe
+ 
+               for i in range(len(rota)):
+                    baslangic_durak = rota[i]
+                    bitis_durak = rota[(i + 1) % self.durak_sayisi]
+ 
+                    self.feromon[baslangic_durak, bitis_durak] += feromon_birikimi
+                    self.feromon[bitis_durak, baslangic_durak] += feromon_birikimi
+ 
+     def calistir(self):
+          """ACO algoritmasını çalıştırır."""
+ 
+          for iterasyon in range(self.iterasyon_sayisi):
+               rotalar = []
+               rota_mesafeleri = []
+ 
+               for _ in range(self.karinca_sayisi):
+                    baslangic_durak = 0
+                    yeni_rota = self._rota_olustur(baslangic_durak)
+                    yeni_mesafe = self._toplam_mesafe_hesapla(yeni_rota)
+ 
+                    rotalar.append(yeni_rota)
+                    rota_mesafeleri.append(yeni_mesafe)
+ 
+                    if yeni_mesafe < self.en_kisa_mesafe:
+                         self.en_kisa_mesafe = yeni_mesafe
+                         self.en_iyi_rota = yeni_rota
+ 
+               self._feromon_guncelle(rotalar, rota_mesafeleri)
+ 
+               self.mesafe_gecmisi.append(self.en_kisa_mesafe)
+ 
+          return self.en_iyi_rota, self.en_kisa_mesafe, self.mesafe_gecmisi
+ 
+# ====================================================================
+# D. STREAMLIT ARABİRİMİ (ZORUNLU)
+# ====================================================================
+ 
+# Sayfa ayarları
+st.set_page_config(layout="wide")
+st.title("📦 Karınca Kolonisi Algoritması (ACO) ile Kargo Rota Optimizasyonu")
+st.subheader("BLG-307 Yapay Zeka - Muratpaşa 21 Mağaza Senaryosu")
+ 
+# --- 1. Parametreler ve Kontrol Paneli ---
+with st.sidebar:
+     st.header("ACO Parametreleri (Girdiler)")
+     karinca_sayisi = st.slider("Karınca Sayısı (K)", 10, 200, 50, 10)
+     iterasyon_sayisi = st.slider("İterasyon Sayısı (Döngü)", 50, 500, 100, 50)
+     alfa = st.slider("Alfa (Feromon Etkisi)", 0.1, 5.0, 1.0, 0.1)
+     beta = st.slider("Beta (Heuristik Etkisi)", 1.0, 10.0, 5.0, 0.5)
+     buharlasma_orani = st.slider("Buharlaşma Oranı (ρ)", 0.01, 0.5, 0.1, 0.01)
+ 
+# --- 2. Çalıştırma ve Sonuçlar ---
+if st.button("🚀 Rota Optimizasyonunu Başlat ve Çiz", type="primary"):
+ 
+     mesafe_matrisi = gercek_mesafe_matrisi_olustur(koordinatlar)
+ 
+     if np.max(mesafe_matrisi) >= 999999.0:
+          st.error("HATA: Mesafe Matrisi hesaplanırken bir hata oluştu. Lütfen API anahtarınızı, kotanızı ve adreslerinizi kontrol edin.")
+     else:
+          st.success("Gerçek yol mesafeleri başarıyla hesaplandı.")
+ 
+          # ACO'yu Başlat ve Çalıştır
+          with st.spinner("ACO algoritması en kısa rotayı bulmak için çalışıyor..."):
+               aco = KarincaKolonisiOptimizasyonu(
+                    mesafeler=mesafe_matrisi,
+                    karinca_sayisi=karinca_sayisi,
+                    iterasyon_sayisi=iterasyon_sayisi,
+                    alfa=alfa,
+                    beta=beta,
+                    buharlasma_orani=buharlasma_orani
+               )
+               en_iyi_rota_indeksler, en_kisa_mesafe, mesafe_gecmisi = aco.calistir()
+ 
+          st.success("Optimizasyon tamamlandı. En kısa rota bulundu.")
+ 
+          # --- Sonuçların Görselleştirilmesi ---
+          col1, col2 = st.columns([1, 1])
+ 
+          with col1:
+               st.header("✨ Optimizasyon Sonuçları")
+               st.metric(label="En Kısa Toplam Mesafe", value=f"{en_kisa_mesafe:.3f} km")
+ 
+               # Rota İsimlerini Çıkar
+               tam_rota_isim = [nokta_isimleri[i] for i in en_iyi_rota_indeksler]
+               final_rota_str = " → ".join([nokta_isimleri[0]] + tam_rota_isim[1:] + [nokta_isimleri[0]])
+ 
+               st.text_area("Optimal Rota Sırası:", final_rota_str, height=120)
+ 
+               st.subheader("📈 Algoritma Performans Grafiği")
+               df_gecmis = pd.DataFrame({
+                    "İterasyon": list(range(1, iterasyon_sayisi + 1)),
+                    "En Kısa Mesafe (km)": mesafe_gecmisi
+               })
+ 
+               fig_hist = px.line(df_gecmis, x="İterasyon", y="En Kısa Mesafe (km)",
+                                  title="İterasyonlara Göre En Kısa Mesafe Değişimi")
+               st.plotly_chart(fig_hist, use_container_width=True)
+ 
+          with col2:
+               st.header("🗺️ Rota Haritası Üzerinde Çizim")
+ 
+               merkez_koordinat = koordinatlar[0]
+               m = folium.Map(location=merkez_koordinat, zoom_start=13)
+ 
+               rota_koordinatlari = [koordinatlar[i] for i in en_iyi_rota_indeksler + [en_iyi_rota_indeksler[0]]]
+ 
+               # En kısa yolun harita üzerinde çizimi
+               folium.PolyLine(
+                    rota_koordinatlari,
+                    color="red",
+                    weight=4,
+                    opacity=0.8,
+                    tooltip=f"En Kısa Rota: {en_kisa_mesafe:.2f} km"
+               ).add_to(m)
+ 
+               # İşaretçiler (Marker)
+               for idx, coord in enumerate(koordinatlar):
+                    renk = 'red' if idx == 0 else 'blue'
+                    ikon = 'home' if idx == 0 else 'shopping-cart'
+ 
+                    folium.Marker(
+                        coord,
+                        popup=f"Durak {idx}: {nokta_isimleri[idx]}",
+                        icon=folium.Icon(color=renk, icon=ikon)
+                    ).add_to(m)
+ 
+               folium_static(m)
